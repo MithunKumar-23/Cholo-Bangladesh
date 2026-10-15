@@ -1,0 +1,1 @@
+', caption: it.caption || '', ...(ref.startsWith('d

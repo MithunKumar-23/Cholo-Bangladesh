@@ -1,0 +1,78 @@
+rules_version = '2';
+// চলো বাংলাদেশ — Firestore নিরাপত্তা নিয়ম
+// Firebase Console → Firestore Database → Rules ট্যাবে পুরোটা পেস্ট করে Publish করুন।
+// নিচের admin@example.com বদলে আপনার প্রধান অ্যাডমিনের ইমেইল দিন (js/config.js-এর OWNER_EMAIL-এর সাথে মিল রেখে)।
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function email() { return signedIn() && request.auth.token.email != null ? request.auth.token.email.lower() : ''; }
+    function isOwner() { return email() == 'admin@example.com'; }
+    function isAdmin() { return isOwner() || (signedIn() && exists(/databases/$(database)/documents/admins/$(email()))); }
+
+    // সবাই পড়তে পারে, শুধু অ্যাডমিন লিখতে পারে
+    match /spots/{id}        { allow read: if true; allow write: if isAdmin(); }
+    match /districtInfo/{id} { allow read: if true; allow write: if isAdmin(); }
+    match /site/{id}         { allow read: if true; allow write: if isAdmin(); }
+    match /media/{id}        { allow read: if true; allow write: if isAdmin(); }
+    match /tips/{id}         { allow read: if true; allow write: if isAdmin(); }
+    match /covers/{id}       { allow read: if true; allow write: if isAdmin(); }
+
+    // অ্যাডমিন তালিকা: নিজের ইমেইলের ডকুমেন্ট নিজে দেখতে পারে, তালিকা বদলাতে পারে শুধু অ্যাডমিন
+    match /admins/{em} {
+      allow get: if signedIn() && (em == email() || isAdmin());
+      allow list, write: if isAdmin();
+    }
+
+    // রেটিং, দুই অংশে:
+    //  ratings/{uid}     প্রত্যেকের নিজের রেটিং (নিজে আর অ্যাডমিন দেখতে পারে)
+    //  ratingStats/all   সব স্পটের মোট যোগফল আর রেটিংদাতার সংখ্যা (সবাই পড়ে; ১টা ডকুমেন্ট)
+    // দুটো একসাথে একই লেনদেনে বদলায়। নিচের নিয়ম মিলিয়ে দেখে যে মোট হিসাব ঠিক
+    // ততটুকুই বদলেছে যতটুকু ব্যবহারকারীর নিজের রেটিং বদলেছে, তাই কেউ হিসাবে কারচুপি করতে পারে না।
+    function myRatingDoc() { return /databases/$(database)/documents/ratings/$(request.auth.uid); }
+    function statsDoc() { return /databases/$(database)/documents/ratingStats/all; }
+    function oldR() { return exists(myRatingDoc()) ? get(myRatingDoc()).data.r : {}; }
+    function newR() { return getAfter(myRatingDoc()).data.r; }
+    function validStatsChange() {
+      let sp = request.resource.data.last.spot;
+      let ov = oldR().get(sp, 0);
+      let nv = newR().get(sp, 0);
+      let os = resource == null ? {} : resource.data.s;
+      let o = os.get(sp, {'sum': 0, 'n': 0});
+      let n = request.resource.data.s[sp];
+      return signedIn()
+        && request.resource.data.keys().hasOnly(['s', 'last'])
+        && request.resource.data.last.keys().hasOnly(['spot', 'by', 'at'])
+        && request.resource.data.last.by == request.auth.uid
+        && getAfter(myRatingDoc()).data.at == request.resource.data.last.at
+        && nv is int && nv >= 1 && nv <= 5
+        && newR().diff(oldR()).affectedKeys().hasOnly([sp])
+        && request.resource.data.s.diff(os).affectedKeys().hasOnly([sp])
+        && n.keys().hasOnly(['sum', 'n'])
+        && n.sum == o.sum + nv - ov
+        && n.n == o.n + (ov == 0 ? 1 : 0);
+    }
+    match /ratings/{uid} {
+      allow read: if (signedIn() && request.auth.uid == uid) || isAdmin();
+      allow write: if signedIn() && request.auth.uid == uid
+                   && request.resource.data.keys().hasOnly(['r', 'at'])
+                   && request.resource.data.r is map
+                   && getAfter(statsDoc()).data.last.by == uid
+                   && getAfter(statsDoc()).data.last.at == request.resource.data.at;
+    }
+    match /ratingStats/{doc} {
+      allow read: if true;
+      allow write: if isAdmin() || (doc == 'all' && validStatsChange());
+    }
+
+    // ব্যবহারকারীর জমা (ছবি, তথ্য, নতুন স্পট): লগইন করা যে কেউ জমা দিতে পারে,
+    // দেখতে ও অনুমোদন/বাতিল করতে পারে শুধু অ্যাডমিন (আর জমাদাতা নিজেরটা দেখতে পারে)
+    match /submissions/{id} {
+      allow create: if signedIn()
+                    && request.resource.data.by == request.auth.uid
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.type in ['photo', 'video', 'vlink', 'info', 'tip', 'spot'];
+      allow read: if isAdmin() || (signedIn() && resource.data.by == request.auth.uid);
+      allow update, delete: if isAdmin();
+    }
+  }
+}
